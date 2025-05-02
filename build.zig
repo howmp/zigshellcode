@@ -4,11 +4,11 @@ pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
 
     {
-        inline for (&.{ "x86", "x86_64", "aarch64" }) |t| {
+        inline for (&.{ "x86", "x86_64", "aarch64" }) |arch| {
             const exe = b.addExecutable(.{
-                .name = "test-" ++ t,
-                .root_source_file = .{ .path = "src/main.zig" },
-                .target = std.zig.CrossTarget.parse(.{ .arch_os_abi = t ++ "-windows-gnu" }) catch unreachable,
+                .name = "test-" ++ arch,
+                .root_source_file = b.path("src/main.zig"),
+                .target = b.resolveTargetQuery(.{ .cpu_arch = getCpuArch(arch), .os_tag = .windows, .abi = .gnu }),
                 .optimize = optimize,
             });
             b.installArtifact(exe);
@@ -21,8 +21,8 @@ pub fn build(b: *std.Build) void {
         inline for (&.{ "x86", "x86_64", "aarch64" }) |arch| {
             const dll = b.addSharedLibrary(.{
                 .name = "sc-" ++ arch,
-                .root_source_file = .{ .path = "src/main.zig" },
-                .target = std.zig.CrossTarget.parse(.{ .arch_os_abi = arch ++ "-windows-msvc" }) catch unreachable,
+                .root_source_file = b.path("src/main.zig"),
+                .target = b.resolveTargetQuery(.{ .cpu_arch = getCpuArch(arch), .os_tag = .windows, .abi = .msvc }),
                 .optimize = .ReleaseSmall,
             });
             const install = b.addInstallArtifact(dll, .{});
@@ -36,8 +36,8 @@ pub fn build(b: *std.Build) void {
         inline for (&.{ "x86", "x86_64", "aarch64" }) |t| {
             const exe = b.addExecutable(.{
                 .name = "loader-" ++ t,
-                .root_source_file = .{ .path = "src/loader.zig" },
-                .target = std.zig.CrossTarget.parse(.{ .arch_os_abi = t ++ "-windows-gnu" }) catch unreachable,
+                .root_source_file = b.path("src/loader.zig"),
+                .target = b.resolveTargetQuery(.{ .cpu_arch = getCpuArch(t), .os_tag = .windows, .abi = .gnu }),
                 .optimize = .ReleaseSmall,
             });
             loader.dependOn(&b.addInstallArtifact(exe, .{}).step);
@@ -48,11 +48,11 @@ pub fn build(b: *std.Build) void {
 const win32 = @import("src/win32.zig");
 
 fn getNt(base: *anyopaque) *anyopaque {
-    var dos: *win32.IMAGE_DOS_HEADER = @ptrCast(@alignCast(base));
+    const dos: *win32.IMAGE_DOS_HEADER = @ptrCast(@alignCast(base));
     return @ptrFromInt(@intFromPtr(base) + @as(u32, @bitCast(dos.e_lfanew)));
 }
 fn rva2ofs(comptime T: type, base: *anyopaque, rva: usize, is64: bool) T {
-    var nt = getNt(base);
+    const nt = getNt(base);
 
     var sh: [*c]win32.IMAGE_SECTION_HEADER = undefined;
     var shNum: usize = 0;
@@ -74,12 +74,12 @@ fn rva2ofs(comptime T: type, base: *anyopaque, rva: usize, is64: bool) T {
         }
     }
     std.debug.assert(ofs != 0);
-    var ptr = @intFromPtr(base) + ofs;
-    return switch (@typeInfo(T)) {
-        .Pointer => {
+    const ptr = @intFromPtr(base) + ofs;
+    return switch (@typeInfo(T)) { // https://github.com/ziglang/zig/blob/master/lib/std/builtin.zig#L563
+        .pointer => {
             return @as(T, @ptrFromInt(ptr));
         },
-        .Int => {
+        .int => {
             if (T != usize) {
                 @compileError("expected usize, found '" ++ @typeName(T) ++ "'");
             }
@@ -100,16 +100,19 @@ fn readFile(filename: []const u8, allocator: std.mem.Allocator) []u8 {
     return stream.toOwnedSlice() catch unreachable;
 }
 
-fn genShellCode(step: *std.Build.Step, prog_node: *std.Progress.Node) anyerror!void {
-    _ = prog_node;
-    const c = @fieldParentPtr(GenShellCode, "step", step);
+fn genShellCode(step: *std.Build.Step, make_options: std.Build.Step.MakeOptions) anyerror!void {
+    _ = make_options;
+    const c: *GenShellCode = @fieldParentPtr("step", step);
     const allocator = step.owner.allocator;
-    const is64 = c.install.artifact.target.cpu_arch != .x86;
+    const resolved_target = c.install.artifact.root_module.resolved_target orelse
+        @panic("the root Module of a Compile step must be created with a known 'target' field");
+    const target = resolved_target.result;
+    const is64 = target.cpu.arch != .x86; // https://github.com/ziglang/zig/blob/master/src/target.zig
 
     {
-        var dir = std.fs.cwd().openDir(step.owner.lib_dir, .{}) catch unreachable;
+        var dir = std.fs.cwd().openDir(step.owner.exe_dir, .{}) catch unreachable;
         defer dir.close();
-        var inst = dir.readFileAllocOptions(
+        const inst = dir.readFileAllocOptions(
             allocator,
             c.install.dest_sub_path,
             1024 * 64,
@@ -118,42 +121,42 @@ fn genShellCode(step: *std.Build.Step, prog_node: *std.Progress.Node) anyerror!v
             null,
         ) catch unreachable;
         // get shellcode by resolve go goEnd symbol
-        var nt = getNt(inst.ptr);
+        const nt = getNt(inst.ptr);
         var rva: u32 = 0;
         if (is64) {
-            var nt64: *win32.IMAGE_NT_HEADERS64 = @alignCast(@ptrCast(nt));
+            const nt64: *win32.IMAGE_NT_HEADERS64 = @alignCast(@ptrCast(nt));
             rva = nt64.OptionalHeader.DataDirectory[win32.IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
         } else {
-            var nt32: *win32.IMAGE_NT_HEADERS32 = @alignCast(@ptrCast(nt));
+            const nt32: *win32.IMAGE_NT_HEADERS32 = @alignCast(@ptrCast(nt));
             rva = nt32.OptionalHeader.DataDirectory[win32.IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
         }
 
         std.debug.assert(rva != 0);
-        var exp = rva2ofs(*align(1) win32.IMAGE_EXPORT_DIRECTORY, inst.ptr, rva, is64);
-        var cnt = exp.NumberOfNames;
+        const exp = rva2ofs(*align(1) win32.IMAGE_EXPORT_DIRECTORY, inst.ptr, rva, is64);
+        const cnt = exp.NumberOfNames;
         std.debug.assert(cnt != 0);
-        var adr = rva2ofs([*c]align(1) u32, inst.ptr, exp.AddressOfFunctions, is64);
-        var sym = rva2ofs([*c]align(1) u32, inst.ptr, exp.AddressOfNames, is64);
-        var ord = rva2ofs([*c]align(1) u16, inst.ptr, exp.AddressOfNameOrdinals, is64);
+        const adr = rva2ofs([*c]align(1) u32, inst.ptr, exp.AddressOfFunctions, is64);
+        const sym = rva2ofs([*c]align(1) u32, inst.ptr, exp.AddressOfNames, is64);
+        const ord = rva2ofs([*c]align(1) u16, inst.ptr, exp.AddressOfNameOrdinals, is64);
         var goFn: [*c]u8 = undefined;
         var fnLen: usize = undefined;
         for (0..cnt) |i| {
-            var sym_ = std.mem.sliceTo(rva2ofs([*c]u8, inst.ptr, sym[i], is64), 0);
-            var adr_ = rva2ofs(usize, inst.ptr, adr[ord[i]], is64);
+            const sym_ = std.mem.sliceTo(rva2ofs([*c]u8, inst.ptr, sym[i], is64), 0);
+            const adr_ = rva2ofs(usize, inst.ptr, adr[ord[i]], is64);
             if (std.mem.eql(u8, sym_, "go")) {
                 goFn = @ptrFromInt(adr_);
             } else if (std.mem.eql(u8, sym_, "goEnd")) {
                 fnLen = adr_ - @as(usize, @intFromPtr(goFn));
             }
         }
-        var shellcode = goFn[0..fnLen];
-        var scname = switch (c.install.artifact.target.cpu_arch.?) {
+        const shellcode = goFn[0..fnLen];
+        const scname = switch (target.cpu.arch) {
             .x86 => "x86.sc",
             .x86_64 => "x86_64.sc",
             .aarch64 => "aarch64.sc",
             else => unreachable,
         };
-        try dir.writeFile(scname, shellcode);
+        try dir.writeFile(.{ .sub_path = scname, .data = shellcode });
     }
 }
 
@@ -177,3 +180,10 @@ const GenShellCode = struct {
         return self;
     }
 };
+
+fn getCpuArch(arch: []const u8) std.Target.Cpu.Arch {
+    if (std.mem.eql(u8, arch, "x86")) return .x86;
+    if (std.mem.eql(u8, arch, "x86_64")) return .x86_64;
+    if (std.mem.eql(u8, arch, "aarch64")) return .aarch64;
+    @panic("Unsupported architecture");
+}
