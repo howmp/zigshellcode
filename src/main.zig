@@ -13,7 +13,7 @@ pub export fn go() void {
         std.log.debug("[-]api not found", .{});
         return;
     }
-    std.log.debug("[+]find {d} api", .{@typeInfo(apiAddr).Struct.fields.len});
+    std.log.debug("[+]find {d} api", .{@typeInfo(apiAddr).@"struct".fields.len});
     var cmdline = "calc".*;
     _ = apis.WinExec.?(&cmdline, 0);
     apis.ExitProcess.?(0);
@@ -31,7 +31,7 @@ const apiAddr = struct {
         nExitCode: windows.LONG,
     ) callconv(windows.WINAPI) void = null,
     fn ok(self: *Self) bool {
-        inline for (@typeInfo(apiAddr).Struct.fields) |field| {
+        inline for (@typeInfo(apiAddr).@"struct".fields) |field| {
             if (@field(self, field.name) == null) {
                 return false;
             }
@@ -41,12 +41,12 @@ const apiAddr = struct {
 };
 
 pub fn rva2va(comptime T: type, base: *const anyopaque, rva: usize) T {
-    var ptr = @intFromPtr(base) + rva;
+    const ptr = @intFromPtr(base) + rva;
     return switch (@typeInfo(T)) {
-        .Pointer => {
+        .pointer => {
             return @as(T, @ptrFromInt(ptr));
         },
-        .Int => {
+        .int => {
             if (T != usize) {
                 @compileError("expected usize, found '" ++ @typeName(T) ++ "'");
             }
@@ -77,27 +77,27 @@ inline fn sliceTo(buf: [*c]u8) []u8 {
 }
 
 fn findApi(r: *apiAddr, inst: windows.PVOID) void {
-    var dos: *win32.IMAGE_DOS_HEADER = @ptrCast(@alignCast(inst));
-    var nt = rva2va(*win32.IMAGE_NT_HEADERS, inst, @as(u32, @bitCast(dos.e_lfanew)));
-    var rva = nt.OptionalHeader.DataDirectory[win32.IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
+    const dos: *win32.IMAGE_DOS_HEADER = @ptrCast(@alignCast(inst));
+    const nt = rva2va(*win32.IMAGE_NT_HEADERS, inst, @as(u32, @bitCast(dos.e_lfanew)));
+    const rva = nt.OptionalHeader.DataDirectory[win32.IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
     if (rva == 0) {
         return;
     }
-    var exp = rva2va(*win32.IMAGE_EXPORT_DIRECTORY, inst, rva);
-    var cnt = exp.NumberOfNames;
+    const exp = rva2va(*win32.IMAGE_EXPORT_DIRECTORY, inst, rva);
+    const cnt = exp.NumberOfNames;
     if (cnt == 0) {
         return;
     }
-    var adr = rva2va([*c]u32, inst, exp.AddressOfFunctions);
-    var sym = rva2va([*c]u32, inst, exp.AddressOfNames);
-    var ord = rva2va([*c]u16, inst, exp.AddressOfNameOrdinals);
-    var dll = sliceTo(rva2va([*c]u8, inst, exp.Name));
+    const adr = rva2va([*c]u32, inst, exp.AddressOfFunctions);
+    const sym = rva2va([*c]u32, inst, exp.AddressOfNames);
+    const ord = rva2va([*c]u16, inst, exp.AddressOfNameOrdinals);
+    const dll = sliceTo(rva2va([*c]u8, inst, exp.Name));
     std.log.debug("[i]{s}", .{dll});
     for (0..cnt) |i| {
-        var sym_ = rva2va([*c]u8, inst, sym[i]);
-        var adr_ = rva2va(usize, inst, adr[ord[i]]);
-        var hash = hashApi(sliceTo(sym_));
-        inline for (@typeInfo(apiAddr).Struct.fields) |field| {
+        const sym_ = rva2va([*c]u8, inst, sym[i]);
+        const adr_ = rva2va(usize, inst, adr[ord[i]]);
+        const hash = hashApi(sliceTo(sym_));
+        inline for (@typeInfo(apiAddr).@"struct".fields) |field| {
             if (hash == comptime hashApi(field.name)) {
                 @field(r, field.name) = @ptrFromInt(adr_);
                 std.log.debug("[+]{s} at 0x{X}", .{ field.name, adr_ });
@@ -107,8 +107,8 @@ fn findApi(r: *apiAddr, inst: windows.PVOID) void {
 }
 
 fn getApi(apis: *apiAddr) bool {
-    var peb = std.os.windows.peb();
-    var ldr = peb.Ldr;
+    const peb = std.os.windows.peb();
+    const ldr = peb.Ldr;
     var dte: *win32.LDR_DATA_TABLE_ENTRY = @ptrCast(ldr.InLoadOrderModuleList.Flink);
     while (dte.DllBase != null) : ({
         dte = @ptrCast(dte.InLoadOrderLinks.Flink);
